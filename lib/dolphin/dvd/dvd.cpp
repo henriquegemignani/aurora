@@ -16,6 +16,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <string>
 #include <thread>
 #include <utility>
@@ -317,9 +318,36 @@ bool isCommandBlockIdle(const DVDCommandBlock* block) {
   return state != DVD_STATE_BUSY && state != DVD_STATE_WAITING;
 }
 
+// Open file handles, keyed by command block. cb.userData belongs to the caller (the game stores its
+// own context there), so the handle cannot live in it.
+std::mutex s_fileHandlesMutex;
+std::unordered_map<const DVDCommandBlock*, CommandDataBase*> s_fileHandles;
+
+CommandDataBase* findFileHandle(const DVDCommandBlock* block) {
+  std::lock_guard lk{s_fileHandlesMutex};
+  const auto it = s_fileHandles.find(block);
+  return it != s_fileHandles.end() ? it->second : nullptr;
+}
+
+void setFileHandle(const DVDCommandBlock* block, CommandDataBase* handle) {
+  std::lock_guard lk{s_fileHandlesMutex};
+  s_fileHandles[block] = handle;
+}
+
+CommandDataBase* takeFileHandle(const DVDCommandBlock* block) {
+  std::lock_guard lk{s_fileHandlesMutex};
+  const auto it = s_fileHandles.find(block);
+  if (it == s_fileHandles.end()) {
+    return nullptr;
+  }
+  CommandDataBase* handle = it->second;
+  s_fileHandles.erase(it);
+  return handle;
+}
+
 CommandDataBase* getCommandHandle(DVDCommandBlock* block) {
-  if (block != nullptr && block->userData != nullptr) {
-    return static_cast<CommandDataBase*>(block->userData);
+  if (CommandDataBase* handle = findFileHandle(block)) {
+    return handle;
   }
   return s_disc;
 }
@@ -1084,7 +1112,7 @@ BOOL DVDFastOpen(s32 entrynum, DVDFileInfo* fileInfo) {
       return FALSE;
     }
 
-    fileInfo->cb.userData = new CommandDataOverlay(handle);
+    setFileHandle(&fileInfo->cb, new CommandDataOverlay(handle));
   } else {
     NodHandle* handle = nullptr;
     NodResult result = nod_partition_open_file(s_partition, entry.origEntryNum, &handle);
@@ -1092,7 +1120,7 @@ BOOL DVDFastOpen(s32 entrynum, DVDFileInfo* fileInfo) {
       return FALSE;
     }
 
-    fileInfo->cb.userData = new CommandDataNod(handle);
+    setFileHandle(&fileInfo->cb, new CommandDataNod(handle));
   }
 
   atomic_store_release(fileInfo->cb.state, DVD_STATE_END);
@@ -1112,10 +1140,7 @@ BOOL DVDClose(DVDFileInfo* fileInfo) {
     return FALSE;
   }
   s_worker.drain_command(&fileInfo->cb);
-  if (fileInfo->cb.userData != nullptr) {
-    delete static_cast<CommandDataBase*>(fileInfo->cb.userData);
-    fileInfo->cb.userData = nullptr;
-  }
+  delete takeFileHandle(&fileInfo->cb);
   atomic_store_release(fileInfo->cb.state, DVD_STATE_END);
   return TRUE;
 }
@@ -1294,7 +1319,7 @@ void* DVDGetFSTLocation(void) {
 
 BOOL DVDPrepareStreamAsync(DVDFileInfo* fileInfo, u32 length, u32 offset, DVDCallback callback) {
   ASSERTMSGLINE(0x46C, fileInfo, "DVDPrepareStreamAsync(): NULL file info was specified");
-  if (fileInfo == nullptr || fileInfo->cb.userData == nullptr) {
+  if (fileInfo == nullptr || findFileHandle(&fileInfo->cb) == nullptr) {
     return FALSE;
   }
   if (length == 0) {
