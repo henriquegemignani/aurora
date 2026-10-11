@@ -1,6 +1,7 @@
 #include "command_processor.hpp"
 
 #include "../gfx/depth_peek.hpp"
+#include "../gfx/hash.hpp"
 #include "../gfx/recording.hpp"
 #include "../internal.hpp"
 #include "dolphin/gd/GDGeometry.h"
@@ -286,6 +287,7 @@ ProcessResult process(const u8* data, u32 size) noexcept {
       for (auto& array : g_gxState.arrays) {
         array.cachedRange = {};
       }
+      g_gxState.arrayUploads.clear();
       g_gxState.dirty |= DirtyImmediates;
       break;
     }
@@ -391,7 +393,18 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
     auto& array = state.arrays[i];
     if (array.cachedRange.size == 0) {
-      array.cachedRange = gfx::push_storage(static_cast<const uint8_t*>(array.data), array.size);
+      // The binding cache only remembers the last array per attribute, but games alternate between
+      // a handful of arrays (per model, per material pass, one array shared by several TEX slots).
+      // Share one upload per distinct array per frame; the content hash guards against a buffer
+      // being rewritten in place between uses.
+      const auto* bytes = static_cast<const uint8_t*>(array.data);
+      const HashType hash = xxh3_hash_s(bytes, array.size);
+      auto& upload = state.arrayUploads[{array.data, array.size}];
+      if (upload.range.size == 0 || upload.hash != hash) {
+        upload.range = gfx::push_storage(bytes, array.size);
+        upload.hash = hash;
+      }
+      array.cachedRange = upload.range;
     }
     immediates.arrayStart[i - GX_VA_POS] = array.cachedRange.offset;
   }

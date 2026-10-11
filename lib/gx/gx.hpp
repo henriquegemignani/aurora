@@ -307,6 +307,13 @@ inline bool operator==(const AttrArray& lhs, const AttrArray& rhs) {
 inline bool operator!=(const AttrArray& lhs, const AttrArray& rhs) { return !(lhs == rhs); }
 
 struct GXState {
+  // Per-frame uploads of vertex arrays, keyed by (data, size)
+  struct ArrayUpload {
+    gfx::Range range;
+    uint64_t hash = 0;
+  };
+  absl::flat_hash_map<std::pair<const void*, u32>, ArrayUpload> arrayUploads;
+
   struct CopyTextureRef {
     gfx::TextureHandle handle;
     u32 revision = 0;
